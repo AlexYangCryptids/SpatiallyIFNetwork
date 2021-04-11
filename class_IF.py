@@ -1,5 +1,4 @@
 import numpy as np
-import scipy
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
@@ -14,6 +13,24 @@ def xy2len(x, y, length):
     unit = 1/length
     return (x+0.5)*unit, (y+0.5)*unit
 
+def list_to_mat(pre_neuron_number, pre_neuron_type, projection_list_mat, Ne_post_1d, Ni_post_1d):
+    E_mat = np.mat(np.zeros((Ne_post_1d, Ne_post_1d)))
+    I_mat = np.mat(np.zeros((Ni_post_1d, Ni_post_1d)))
+    Ne_post = Ne_post_1d ** 2
+    Ni_post = Ni_post_1d ** 2
+
+    projection = projection_list_mat[pre_neuron_number]
+
+    for i in range(Ne_post):
+        x_temp, y_temp = compute_xy(i, Ne_post_1d)
+        E_mat[x_temp, y_temp] = projection[i]
+
+    for j in range(Ne_post, Ne_post + Ni_post):
+        x_temp_1, y_temp_1 = compute_xy(j - Ne_post, Ni_post_1d)
+        I_mat[x_temp_1, y_temp_1] = projection[j]
+
+    return E_mat, I_mat
+
 def wrapped_gaussian(x_mat, sigma, k_list):
 
     g = 0
@@ -25,10 +42,18 @@ def wrapped_gaussian(x_mat, sigma, k_list):
 
     return g / (np.sqrt(2*np.pi) * sigma)
 
+# this shall be a smart way
+def eta(tau_r, tau_d, t):
+    if t <= 0:
+        return 0
+    else:
+        up = np.exp(-t/tau_d) - np.exp(-t/tau_r)
+        down = tau_d - tau_r
+        return up/down
 
 class EIF_NN_fast:
 
-    def __init__(self, NN_size_set, initial_V, Wf_in, Wf_out, tau_set, J_set, alpha_rec, p_mean_rec_set,step_set, V_set, other_NN, mu_set, pf, ps):
+    def __init__(self, NN_size_set, initial_V, Wf_in, Wf_out, tau_set, j_set, alpha_rec, p_mean_rec_set,step_set, V_set, other_NN, mu_set, pf, ps):
         # parameter set contains recurrent alpha, and tau
         # since poisson_spike_train contains Wf_in, we do not need this any more
         self.Wf_in = Wf_in
@@ -66,13 +91,13 @@ class EIF_NN_fast:
         self.tau_sd = tau_set[9]
 
         #they're recurrent J
-        self.Jee = J_set[0]
-        self.Jei = J_set[1]
-        self.Jie = J_set[2]
-        self.Jii = J_set[3]
+        self.jee = j_set[0]
+        self.jei = j_set[1]
+        self.jie = j_set[2]
+        self.jii = j_set[3]
         # they are feedforward J
-        self.Jef = J_set[4]
-        self.Jif = J_set[5]
+        self.jef = j_set[4]
+        self.jif = j_set[5]
 
         # then load voltage parameters
         self.VL = V_set[0]  # leaky voltage
@@ -117,13 +142,38 @@ class EIF_NN_fast:
     def return_inner_voltage(self):
         return self.V
 
-    def return_PDF(self, step_number):
-        return self.V_record[:, step_number]
+    def return_all_time_voltage(self):
+        return self.V_record
+
+    def return_pdf(self, step_number, time_bin_size, V_bin_number, neuron_type):
+
+        V_list = np.linspace(self.Vre-1, self.V_threshold+1, V_bin_number)
+
+        V_pdf = np.zeros((V_bin_number))
+
+        for i in range(time_bin_size):
+            if neuron_type == 'EI':
+                for j in range(self.N):
+                    idx = np.argmin(np.abs(V_list-self.V_record[j, step_number+i]))
+                    V_pdf[idx] += 1
+            elif neuron_type == 'E':
+                for j in range(self.Ne):
+                    idx = np.argmin(np.abs(V_list-self.V_record[j, step_number+i]))
+                    V_pdf[idx] += 1
+            elif neuron_type == 'I':
+                for j in range(self.Ne+1, self.N):
+                    idx = np.argmin(np.abs(V_list-self.V_record[j, step_number+i]))
+                    V_pdf[idx] += 1
+
+        return V_pdf/(self.N * time_bin_size)
+
 
     def make_recurrent(self):
         # then make recurrent connection
         k_range = 7
-        k_list = np.linspace(-k_range, k_range, 2 * k_range)
+        k_list = []
+        for i in range(2 * k_range + 1):
+            k_list.append(-k_range + i)
         # first E pop then I pop
         p_mean_ee = self.p_mean_rec_set[0]
         p_mean_ie = self.p_mean_rec_set[1]
@@ -152,11 +202,13 @@ class EIF_NN_fast:
             x0, y0 = compute_xy(i, self.Ne_1d)
             a0, b0 = xy2len(x0, y0, self.Ne_1d)
             for j in range(N_e):
-                if i != j:
-                    x1, y1 = compute_xy(j, self.Ne_1d)
-                    a1, b1 = xy2len(x1, y1, self.Ne_1d)
-                    g_ee[0, i, j] = abs(a0 - a1)
-                    g_ee[1, i, j] = abs(b0 - b1)
+
+                x1, y1 = compute_xy(j, self.Ne_1d)
+                a1, b1 = xy2len(x1, y1, self.Ne_1d)
+                distance_a = abs(a0 - a1)
+                distance_b = abs(b0 - b1)
+                g_ee[0, i, j] = distance_a
+                g_ee[1, i, j] = distance_b
 
         g_ee = wrapped_gaussian(g_ee, self.alpha_rec_e, k_list)
         g_ee = g_ee[0] * g_ee[1]
@@ -167,11 +219,14 @@ class EIF_NN_fast:
             x0, y0 = compute_xy(i, self.Ne_1d)
             a0, b0 = xy2len(x0, y0, self.Ne_1d)
             for j in range(N_i):
-                if i != j:
-                    x1, y1 = compute_xy(j, self.Ni_1d)
-                    a1, b1 = xy2len(x1, y1, self.Ni_1d)
-                    g_ie[0, i, j] = abs(a0 - a1)
-                    g_ie[1, i, j] = abs(b0 - b1)
+
+                x1, y1 = compute_xy(j, self.Ni_1d)
+                a1, b1 = xy2len(x1, y1, self.Ni_1d)
+                distance_a = abs(a0 - a1)
+                distance_b = abs(b0 - b1)
+                g_ie[0, i, j] = distance_a
+                g_ie[1, i, j] = distance_b
+
         g_ie = wrapped_gaussian(g_ie, self.alpha_rec_e, k_list)
         g_ie = g_ie[0] * g_ie[1]
         #print('g finish')
@@ -181,11 +236,14 @@ class EIF_NN_fast:
             x0, y0 = compute_xy(i, self.Ni_1d)
             a0, b0 = xy2len(x0, y0, self.Ni_1d)
             for j in range(N_e):
-                if i != j:
-                    x1, y1 = compute_xy(j, self.Ne_1d)
-                    a1, b1 = xy2len(x1, y1, self.Ne_1d)
-                    g_ei[0, i, j] = abs(a0 - a1)
-                    g_ei[1, i, j] = abs(b0 - b1)
+
+                x1, y1 = compute_xy(j, self.Ne_1d)
+                a1, b1 = xy2len(x1, y1, self.Ne_1d)
+                distance_a = abs(a0 - a1)
+                distance_b = abs(b0 - b1)
+                g_ei[0, i, j] = distance_a
+                g_ei[1, i, j] = distance_b
+
         g_ei = wrapped_gaussian(g_ei, self.alpha_rec_i, k_list)
         g_ei = g_ei[0] * g_ei[1]
         #print('g finish')
@@ -195,11 +253,14 @@ class EIF_NN_fast:
             x0, y0 = compute_xy(i, self.Ni_1d)
             a0, b0 = xy2len(x0, y0, self.Ni_1d)
             for j in range(N_i):
-                if i != j:
-                    x1, y1 = compute_xy(j, self.Ni_1d)
-                    a1, b1 = xy2len(x1, y1, self.Ni_1d)
-                    g_ii[0, i, j] = abs(a0 - a1)
-                    g_ii[1, i, j] = abs(b0 - b1)
+
+                x1, y1 = compute_xy(j, self.Ni_1d)
+                a1, b1 = xy2len(x1, y1, self.Ni_1d)
+                distance_a = abs(a0 - a1)
+                distance_b = abs(b0 - b1)
+                g_ii[0, i, j] = distance_a
+                g_ii[1, i, j] = distance_b
+
         g_ii = wrapped_gaussian(g_ii, self.alpha_rec_i, k_list)
         g_ii = g_ii[0] * g_ii[1]
         #print('g finish')
@@ -210,7 +271,7 @@ class EIF_NN_fast:
             for j in range(N_e):
                 prob = p_mean_ee * g_ee[i, j]
                 if prob > prob_mat[i, j]:
-                    W_ee[i][j] = 1
+                    W_ee[i][j] = self.jee
 
         # W_ie
         prob_mat = np.random.uniform(0, 1, (N_e, N_i))
@@ -218,7 +279,7 @@ class EIF_NN_fast:
             for j in range(N_i):
                 prob = p_mean_ie * g_ie[i, j]
                 if prob > prob_mat[i, j]:
-                    W_ie[i][j] = 1
+                    W_ie[i][j] = self.jie
 
         # W_ei
         prob_mat = np.random.uniform(0, 1, (N_i, N_e))
@@ -226,7 +287,7 @@ class EIF_NN_fast:
             for j in range(N_e):
                 prob = p_mean_ei * g_ei[i, j]
                 if prob > prob_mat[i, j]:
-                    W_ei[i][j] = 1
+                    W_ei[i][j] = self.jei
 
         # W_ii
         prob_mat = np.random.uniform(0, 1, (N_i, N_i))
@@ -234,10 +295,12 @@ class EIF_NN_fast:
             for j in range(N_i):
                 prob = p_mean_ii * g_ii[i, j]
                 if prob > prob_mat[i, j]:
-                    W_ii[i][j] = 1
+                    W_ii[i][j] = self.jii
 
         temp_W_1 = np.concatenate((W_ee, W_ie), axis=1)
         temp_W_2 = np.concatenate((W_ei, W_ii), axis=1)
+        #print(np.shape(temp_W_1))
+        #print(np.shape(temp_W_2))
 
         temp_g_1 = np.concatenate((g_ee, g_ie), axis=1)
         temp_g_2 = np.concatenate((g_ei, g_ii), axis=1)
@@ -245,68 +308,61 @@ class EIF_NN_fast:
         self.Wrr = np.concatenate((temp_W_1, temp_W_2), axis=0)
         self.grr = np.concatenate((temp_g_1, temp_g_2), axis=0)
 
+        # note that neuron cannot make projection to itself
+        for i in range(self.N):
+            self.Wrr[i, i] = 0
+            self.grr[i, i] = 0
+
         Wrr_trans = self.Wrr.transpose()
-
-        Wrr_trans[:self.Ne, :self.Ne] = self.Jee * Wrr_trans[:self.Ne, :self.Ne] / np.sqrt(self.Ne)
-        Wrr_trans[:self.Ne, self.Ne:] = self.Jei * Wrr_trans[:self.Ne, self.Ne:] / np.sqrt(self.Ni)
-        Wrr_trans[self.Ne:, :self.Ne] = self.Jie * Wrr_trans[self.Ne:, :self.Ne] / np.sqrt(self.Ne)
-        Wrr_trans[self.Ne:, self.Ne:] = self.Jii * Wrr_trans[self.Ne:, self.Ne:] / np.sqrt(self.Ni)
-
         self.Wrr_trans = Wrr_trans
 
 
-    def check_recurrent_connection(self):
 
-        def position2what(list_number, neuron_type, grr):
-            E_mat = np.mat(np.zeros((self.Ne_1d, self.Ne_1d)))
-            I_mat = np.mat(np.zeros((self.Ni_1d, self.Ni_1d)))
 
-            if neuron_type == 'E':
-                projection = grr[list_number]
-                true_x, true_y = compute_xy(list_number, self.Ne_1d)
-                print(f'the position is {true_x, true_y}')
+    def check_recurrent_connection(self, pre, post):
 
-                for i in range(self.Ne):
-                    x_temp, y_temp = compute_xy(i, self.Ne_1d)
-                    E_mat[x_temp, y_temp] = projection[i]
-                    E_mat[true_x, true_y] = 30
+        a = self.Wrr
 
-                for i in range(self.Ne, self.Ne + self.Ni):
-                    x_temp_1, y_temp_1 = compute_xy(i - self.Ne, self.Ni_1d)
-                    I_mat[x_temp_1, y_temp_1] = projection[i]
-                    # I_mat[true_x, true_y] = 30
-
-            if neuron_type == 'I':
-                projection = grr[list_number]
-                list_number -= self.Ne
-                true_x, true_y = compute_xy(list_number, self.Ni_1d)
-                print(f'the position is {true_x, true_y}')
-
-                for i in range(self.Ne):
-                    x_temp, y_temp = compute_xy(i, self.Ne_1d)
-                    E_mat[x_temp, y_temp] = projection[i]
-                    # E_mat[true_x, true_y] = 30
-
-                for i in range(self.Ne, self.Ne + self.Ni):
-                    x_temp, y_temp = compute_xy(i - self.Ne, self.Ni_1d)
-                    I_mat[x_temp, y_temp] = projection[i]
-                    I_mat[true_x, true_y] = 30
-
-            return E_mat, I_mat
-
-        a = self.grr
+        temp_map_EE = 0
+        temp_map_IE = 0
+        temp_map_EI = 0
+        temp_map_II = 0
 
         fig = plt.figure()
         ims = []
-        for j in range(self.Ne, self.Ne+self.Ni):
-        #for j in range(self.Ne):
-            E_mat_0, I_mat_0 = position2what(j, 'I', a)
-            im = plt.imshow(I_mat_0, cmap=plt.cm.Blues)
-            ims.append([im])
+        if pre == 'E':
+            for j in range(self.Ne):
+                E_mat_0, I_mat_0 = list_to_mat(j, 'E', a, self.Ne_1d, self.Ni_1d)
+                if post == 'E':
+                    im = plt.imshow(E_mat_0, cmap=plt.cm.Blues)
+                    temp_map_EE += E_mat_0
+                elif post == 'I':
+                    im = plt.imshow(I_mat_0, cmap=plt.cm.Blues)
+                    temp_map_IE += I_mat_0
+                ims.append([im])
+
+        if pre == 'I':
+            for j in range(self.Ne, self.Ne+self.Ni):
+                E_mat_0, I_mat_0 = list_to_mat(j, 'I', a, self.Ne_1d, self.Ni_1d)
+                if post == 'E':
+                    im = plt.imshow(E_mat_0, cmap=plt.cm.Blues)
+                    temp_map_EI += E_mat_0
+                elif post == 'I':
+                    im = plt.imshow(I_mat_0, cmap=plt.cm.Blues)
+                    temp_map_II += I_mat_0
+                ims.append([im])
 
         ani = animation.ArtistAnimation(fig, ims, interval=100)
-        ani.save('C:\\Users\\lufen\\Desktop\\checkNOW.gif')
-        # ani.save('dynamic_images.gif')
+
+        if pre == 'E' and post == 'E':
+            plt.matshow(temp_map_EE)
+        if pre == 'E' and post == 'I':
+            plt.matshow(temp_map_IE)
+        if pre == 'I' and post == 'E':
+            plt.matshow(temp_map_EI)
+        if pre == 'I' and post == 'I':
+            plt.matshow(temp_map_II)
+        plt.colorbar()
         plt.show()
 
 
@@ -322,31 +378,29 @@ class EIF_NN_fast:
             receive_spike_mat_e = np.mat(self.Wrr_trans[:, :self.Ne]) * np.mat(self.inner_spike_train[:self.Ne, self.step_now-self.step_window:self.step_now])
             receive_spike_mat_i = np.mat(self.Wrr_trans[:, self.Ne:]) * np.mat(self.inner_spike_train[self.Ne:,self.step_now-self.step_window:self.step_now])
 
-            nabla_mat_e = [(np.exp(-self.step_size*(self.step_window - t)/self.tau_ed) - np.exp(-self.step_size*(self.step_window - t)/self.tau_er))/(self.tau_ed - self.tau_er) for t in range(self.step_window)]
+            nabla_mat_e = [ eta(self.tau_er, self.tau_ed, self.step_size*(self.step_window - t))for t in range(self.step_window)]
             nabla_mat_e = np.mat(nabla_mat_e)
 
-            nabla_mat_i = [(np.exp(-self.step_size * (self.step_window - t) / self.tau_id) - np.exp(
-                -self.step_size * (self.step_window - t) / self.tau_ir)) / (self.tau_id - self.tau_ir) for t in
+
+            nabla_mat_i = [eta(self.tau_ir, self.tau_id, self.step_size * (self.step_window - t)) for t in
                            range(self.step_window)]
             nabla_mat_i = np.mat(nabla_mat_i)
 
             reccurent_term_in_e = receive_spike_mat_e[:] * nabla_mat_e.T
             reccurent_term_in_i = receive_spike_mat_i[:] * nabla_mat_i.T
 
-        else:# if not fit in spike window
+        else: # if not in spike window
 
             receive_spike_mat_e = np.mat(self.Wrr_trans[:, :self.Ne]) * np.mat(self.inner_spike_train[:self.Ne, :self.step_now+1])
             receive_spike_mat_i = np.mat(self.Wrr_trans[:, self.Ne:]) * np.mat(self.inner_spike_train[self.Ne:, :self.step_now+1])
 
 
-            nabla_mat_e = [(np.exp(-self.step_size * (self.step_now+1 - t) / self.tau_ed) - np.exp(
-                -self.step_size * (self.step_now+1 - t) / self.tau_er)) / (self.tau_ed - self.tau_er) for t in
+            nabla_mat_e = [eta(self.tau_er, self.tau_ed, self.step_size * (self.step_now+1 - t)) for t in
                            range(self.step_now+1)]
             nabla_mat_e = np.mat(nabla_mat_e)
 
-            nabla_mat_i = [(np.exp(-self.step_size * (self.step_now+1 - t) / self.tau_id) - np.exp(
-                -self.step_size * (self.step_now+1 - t) / self.tau_ir)) / (self.tau_id - self.tau_ir) for t in
-                           range(self.step_now+1)]
+            nabla_mat_i = [eta(self.tau_ir, self.tau_id, self.step_size * (self.step_now + 1 - t)) for t in
+                           range(self.step_now + 1)]
             nabla_mat_i = np.mat(nabla_mat_i)
 
             #print(np.shape(receive_spike_mat_e[:, -(self.step_now+1):]))
@@ -376,47 +430,42 @@ class EIF_NN_fast:
 
         if self.step_now > self.step_window:
             # fast and slow components
-            nabla_mat = [self.pf * ((np.exp(-self.step_size * (self.step_window - t) / self.tau_ed) - np.exp(
-                -self.step_size * (self.step_window - t) / self.tau_er)) / (self.tau_ed - self.tau_er))
-                         + self.ps * ((np.exp(-self.step_size * (self.step_window - t) / self.tau_sd) - np.exp(
-                -self.step_size * (self.step_window - t) / self.tau_sr)) / (self.tau_sd - self.tau_sr)) for t in
-                         range(self.step_window)]
+            nabla_mat = [self.pf * eta(self.tau_er, self.tau_ed,self.step_size * (self.step_window - t) ) +
+                         self.ps*eta(self.tau_sr,self.tau_sd, self.step_size * (self.step_window - t) ) for t in range(self.step_window)]
             nabla_mat = np.mat(nabla_mat)
 
             # if there is poisson input
             if flag_p == 1:
-                poisson_spike_train[:self.Ne] = self.Jef * poisson_spike_train[:self.Ne] / np.sqrt(self.Nx)
-                poisson_spike_train[self.Ne:] = self.Jif * poisson_spike_train[self.Ne:] / np.sqrt(self.Nx)
+                poisson_spike_train[:self.Ne] = self.jef * poisson_spike_train[:self.Ne]
+                poisson_spike_train[self.Ne:] = self.jif * poisson_spike_train[self.Ne:]
 
                 poisson_term = poisson_spike_train[:, self.step_now-self.step_window:self.step_now] * nabla_mat.T
             #if there is feedforward input from another layer
             if flag_f == 1:
-                ff_spike[:self.Ne] = self.Jef * ff_spike[:self.Ne] / np.sqrt(self.N_in_e)
-                ff_spike[self.Ne:] = self.Jif * ff_spike[self.Ne:] / np.sqrt(self.N_in_e)
+                ff_spike[:self.Ne] = self.jef * ff_spike[:self.Ne]
+                ff_spike[self.Ne:] = self.jif * ff_spike[self.Ne:]
                 ff_term = ff_spike[:, self.step_now-self.step_window:self.step_now] * nabla_mat.T
 
 
 
         else:
-            nabla_mat = [self.pf * ((np.exp(-self.step_size * (self.step_now+1 - t) / self.tau_ed) - np.exp(
-                -self.step_size * (self.step_now+1 - t) / self.tau_er)) / (self.tau_ed - self.tau_er))
-                         + self.ps * ((np.exp(-self.step_size * (self.step_now+1 - t) / self.tau_sd) - np.exp(
-                -self.step_size * (self.step_now+1 - t) / self.tau_sr)) / (self.tau_sd - self.tau_sr)) for t in
+            nabla_mat = [self.pf * eta(self.tau_er, self.tau_ed, self.step_size * (self.step_now+1 - t)) +
+                         self.ps * eta(self.tau_sr, self.tau_sd, self.step_size * (self.step_now+1 - t)) for t in
                          range(self.step_now+1)]
             nabla_mat = np.mat(nabla_mat)
 
             # if there is poisson input
             if flag_p == 1:
                 #p_spike_train = poisson_spike_train.copy()
-                poisson_spike_train[:self.Ne] = self.Jef * poisson_spike_train[:self.Ne] / np.sqrt(self.Nx)
-                poisson_spike_train[self.Ne:] = self.Jif * poisson_spike_train[self.Ne:] / np.sqrt(self.Nx)
+                poisson_spike_train[:self.Ne] = self.jef * poisson_spike_train[:self.Ne]
+                poisson_spike_train[self.Ne:] = self.jif * poisson_spike_train[self.Ne:]
                 poisson_term = poisson_spike_train[:, :self.step_now+1] * nabla_mat.T
 
 
             # if there is feedforward input from another layer
             if flag_f == 1:
-                ff_spike[:self.Ne] = self.Jef * ff_spike[:self.Ne] / np.sqrt(self.N_in_e)
-                ff_spike[self.Ne:] = self.Jif * ff_spike[self.Ne:] / np.sqrt(self.N_in_e)
+                ff_spike[:self.Ne] = self.jef * ff_spike[:self.Ne]
+                ff_spike[self.Ne:] = self.jif * ff_spike[self.Ne:]
                 ff_term = ff_spike[:, :self.step_now+1] * nabla_mat.T
         #print(poisson_term[0])
         total_ff_term = ff_term + poisson_term

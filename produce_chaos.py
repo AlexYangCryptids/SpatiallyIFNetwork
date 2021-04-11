@@ -4,6 +4,7 @@ import matplotlib.pyplot as plt
 from class_IF import EIF_NN_fast
 import time
 import matplotlib.animation as animation
+from matplotlib.animation import FuncAnimation, PillowWriter
 
 def compute_xy(i, length):
     x = i % length
@@ -166,9 +167,9 @@ def gen_poisson_spike(Nx, T, rx, step_size):
 
 # the input parameters are Ne_1d, initial_V, Wf_in, Wf_out, tau_set, J_set, alpha_rec, p_mean_rec, step_set, V_set, other_NN
 
-Ne_1d = 40
-Ni_1d = 40
-Nx_1d = 20
+Ne_1d = 50
+Ni_1d = 50
+Nx_1d = 30
 Nx = Nx_1d ** 2
 Ne_2 = Ne_1d ** 2
 Ni_2 = Ni_1d ** 2
@@ -196,12 +197,12 @@ tau_sd = 100
 tau_set = [tau_m_e, tau_m_i, tau_ref_e, tau_ref_i, tau_er, tau_ed, tau_ir, tau_id, tau_sr, tau_sd]
 
 # set J
-Jee = 80
-Jei = -60
-Jie = 80
-Jii = -60
-Jef_12 = 100
-Jif_12 = 70
+Jee = 25
+Jei = -25
+Jie = 25
+Jii = -25
+Jef_12 = 30
+Jif_12 = 30
 Jef_23 = 25
 Jif_23 = 15
 J_set_2 = [Jee, Jei, Jie, Jii, Jef_12, Jif_12]
@@ -215,7 +216,7 @@ alpha_rec_i_3 = 0.2
 alpha_rec_2= [alpha_rec_e_2, alpha_rec_i_2]
 alpha_rec_3 = [alpha_rec_e_3, alpha_rec_i_3]
 
-alpha_forward_12 = 0.05
+alpha_forward_12 = 0.025
 alpha_forward_23 = 0.1
 
 # recurrent
@@ -238,9 +239,9 @@ p_mean_rec_set_2 = [p_mean_rec_ee, p_mean_rec_ie, p_mean_rec_ei, p_mean_rec_ii]
 p_mean_rec_set_3 = [p_mean_rec_ee, p_mean_rec_ie, p_mean_rec_ei, p_mean_rec_ii]
 
 # here is step set
-step_size = 0.025
+step_size = 0.05
 step_window = int(50 /step_size)
-total_step = 500
+total_step = 1000
 step_set = [step_size, step_window, total_step]
 
 # here is voltage set
@@ -355,29 +356,47 @@ plt.show()
 '''
 
 s2 = E_layer_2.return_inner_spikes()
+time_bin_size = int(1/step_size) # thus i frame could cover the behavior in 1 ms
+mseconds = int(test_steps/time_bin_size)
+snapshot_set = np.zeros((mseconds, Ne_1d, Ne_1d))
 
+snapshot_temp = np.zeros((Ne_1d, Ne_1d))
 
-snapshot_set = np.zeros((test_steps, Ne_1d, Ne_1d))
-for j in range(test_steps):
-    s = s2[:Ne_2, j ]
+def update_matrix(j):
+    snapshot_temp = np.zeros((Ne_1d, Ne_1d))
+    step_here = j * time_bin_size
+    s = s2[:Ne_2, step_here]
+    for t in range(1, time_bin_size):
+        s += s2[:Ne_2, step_here+t]
 
     for i in range(Ne_2):
         x0, y0 = compute_xy(i, Ne_1d)
         #a0, b0 = xy2len(x0, y0, Ne_1d)
-        snapshot_set[j, x0, y0] = s[i]
+        snapshot_temp[x0, y0] = s[i]
+    matrice.set_array(snapshot_temp)
 
-fig = plt.figure()
-
-ims = []
-for j in range(5, test_steps):
-    im = plt.imshow(snapshot_set[j], cmap=plt.cm.Blues)
-    ims.append([im])
-
-ani = animation.ArtistAnimation(fig, ims, interval=50)
-ani.save('C:\\Users\\lufen\\Desktop\\dynamic_images.gif')
-#ani.save('dynamic_images.gif')
+fig1, ax1 = plt.subplots()
+matrice = ax1.matshow(snapshot_temp)
+plt.colorbar(matrice)
+ani = animation.FuncAnimation(fig1, update_matrix, frames=mseconds, interval=200)
 plt.show()
-'''
-for j in range(test_steps):
-    plt.matshow(snapshot_set[j])
-    plt.show()'''
+ani.save('C:\\Users\\lufen\\Desktop\\firing_images.gif', writer=PillowWriter(fps=100))
+
+
+
+
+V_bin_number = 40
+def animate(j):
+    x, y = np.linspace(Vre-1, V_threshold+1, V_bin_number), E_layer_2.return_pdf(j*time_bin_size, time_bin_size, V_bin_number, 'EI')
+    line.set_data((x,y))
+    ax.set_xlim(Vre-1, V_threshold+1)
+    ax.set_ylim(0, 1)
+    return line
+
+fig, ax = plt.subplots()
+line,  = ax.plot([], [], lw=2)
+anim = FuncAnimation(fig, animate, mseconds)
+plt.show()
+
+anim.save('C:\\Users\\lufen\\Desktop\\PDF_images.gif', writer=PillowWriter(fps=100))
+
